@@ -1,0 +1,41 @@
+# Traefik Static Configuration
+# This file configures Traefik to use the HTTP to NATS plugin
+
+# API and Dashboard
+api:
+  dashboard: true
+  insecure: true
+
+# Entry Points
+entryPoints:
+  web:
+    address: ":80"
+
+  websecure:
+    address: ":443"
+
+# Providers
+providers:
+  file:
+    filename: /etc/traefik/dynamic-config.yml
+    watch: true
+
+# Logging
+log:
+  level: DEBUG
+
+# Access Logs
+accessLog: {}
+
+# Experimental Features - Required for plugins
+experimental:
+  # For local plugin development
+  localPlugins:
+    http-to-nats:
+      moduleName: github.com/dominikdosoudil/traefik-plugin-http-to-nats
+
+  # For production use (uncomment and comment out localPlugins above)
+  # plugins:
+  #   http-to-nats:
+  #     moduleName: github.com/dominikdosoudil/traefik-plugin-http-to-nats
+  #     version: v1.0.0

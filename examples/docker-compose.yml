@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # NATS Server
+  nats:
+    image: nats:latest
+    container_name: nats-server
+    ports:
+      - "4222:4222"  # Client connections
+      - "8222:8222"  # HTTP monitoring
+      - "6222:6222"  # Cluster connections
+    command:
+      - "-js"                    # Enable JetStream
+      - "-m"                     # Enable monitoring
+      - "8222"                   # Monitoring port
+      - "--name"
+      - "nats-server"
+    networks:
+      - nats-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Example NATS Service (responds to HTTP requests forwarded by Traefik)
+  nats-service:
+    build:
+      context: ./nats-service
+      dockerfile: Dockerfile
+    container_name: nats-service
+    environment:
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - nats-network
+    restart: unless-stopped
+
+  # Traefik Reverse Proxy with HTTP to NATS Plugin
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    ports:
+      - "80:80"      # HTTP
+      - "443:443"    # HTTPS
+      - "8080:8080"  # Traefik Dashboard
+    volumes:
+      # Mount Traefik configuration
+      - ./traefik-config/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik-config/dynamic-config.yml:/etc/traefik/dynamic-config.yml:ro
+
+      # Mount the plugin (for local development)
+      - ../:/plugins-local/src/github.com/dominikdosoudil/traefik-plugin-http-to-nats:ro
+
+      # Mount Docker socket for Docker provider (optional)
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - TRAEFIK_LOG_LEVEL=DEBUG
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - nats-network
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=false"
+
+  # Optional: NATS Box for debugging and testing
+  nats-box:
+    image: natsio/nats-box:latest
+    container_name: nats-box
+    command: sleep infinity
+    depends_on:
+      - nats
+    networks:
+      - nats-network
+    restart: unless-stopped
+
+networks:
+  nats-network:
+    driver: bridge
+
+# Optional: Volumes for persistent data
+# volumes:
+#   nats-data:
+#     driver: local

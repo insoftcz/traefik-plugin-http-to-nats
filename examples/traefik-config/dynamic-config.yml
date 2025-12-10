@@ -1,0 +1,80 @@
+# Traefik Dynamic Configuration
+# This file configures routes and middlewares using the HTTP to NATS plugin
+
+http:
+  # Middleware Definitions
+  middlewares:
+    # Basic NATS gateway middleware
+    nats-gateway:
+      plugin:
+        http-to-nats:
+          natsUrl: "nats://nats:4222"
+          subjectPattern: "/api/{subject}"
+          timeout: 5000
+
+    # NATS gateway with authentication
+    nats-gateway-auth:
+      plugin:
+        http-to-nats:
+          natsUrl: "nats://nats:4222"
+          subjectPattern: "/secure/{subject}"
+          timeout: 3000
+          username: "traefik"
+          password: "secret"
+
+    # NATS gateway with token authentication
+    nats-gateway-token:
+      plugin:
+        http-to-nats:
+          natsUrl: "nats://nats:4222"
+          subjectPattern: "/v1/{subject}"
+          timeout: 10000
+          token: "my-secret-token"
+
+    # Multi-segment pattern example
+    nats-microservices:
+      plugin:
+        http-to-nats:
+          natsUrl: "nats://nats:4222"
+          subjectPattern: "/services/{subject}/action"
+          timeout: 5000
+
+  # Router Definitions
+  routers:
+    # Route for /api/* endpoints
+    api-router:
+      rule: "PathPrefix(`/api/`)"
+      service: noop@internal
+      middlewares:
+        - nats-gateway
+      priority: 100
+
+    # Route for /secure/* endpoints
+    secure-router:
+      rule: "PathPrefix(`/secure/`)"
+      service: noop@internal
+      middlewares:
+        - nats-gateway-auth
+      priority: 90
+
+    # Route for /v1/* endpoints
+    v1-router:
+      rule: "PathPrefix(`/v1/`)"
+      service: noop@internal
+      middlewares:
+        - nats-gateway-token
+      priority: 80
+
+    # Route for /services/* endpoints
+    services-router:
+      rule: "PathPrefix(`/services/`)"
+      service: noop@internal
+      middlewares:
+        - nats-microservices
+      priority: 70
+
+# TLS Configuration (optional)
+# tls:
+#   certificates:
+#     - certFile: /path/to/cert.pem
+#       keyFile: /path/to/key.pem

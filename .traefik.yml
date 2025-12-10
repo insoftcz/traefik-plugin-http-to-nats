@@ -1,0 +1,10 @@
+displayName: HTTP to NATS Plugin
+type: middleware
+
+import: github.com/dominikdosoudil/traefik-plugin-http-to-nats
+
+summary: Forwards HTTP requests to NATS based on URL patterns
+
+testData:
+  NatsUrl: nats://localhost:4222
+  SubjectPattern: /nats/{subject}
