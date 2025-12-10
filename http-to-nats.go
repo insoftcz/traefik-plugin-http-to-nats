@@ -169,40 +169,8 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// Restore body for potential next handler
 	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	// Build headers map
-	headers := make(map[string]string)
-	for key, values := range req.Header {
-		if len(values) > 0 {
-			headers[key] = values[0]
-		}
-	}
-
-	// Build query params map
-	query := make(map[string]string)
-	for key, values := range req.URL.Query() {
-		if len(values) > 0 {
-			query[key] = values[0]
-		}
-	}
-
-	// Create NATS request
-	natsReq := NatsRequest{
-		Method:  req.Method,
-		Path:    req.URL.Path,
-		Headers: headers,
-		Query:   query,
-		Body:    string(bodyBytes),
-	}
-
-	// Marshal to JSON
-	reqJSON, err := json.Marshal(natsReq)
-	if err != nil {
-		http.Error(rw, "Failed to marshal request", http.StatusInternalServerError)
-		return
-	}
-
-	// Send request to NATS and wait for response
-	respData, err := h.natsClient.Request(subject, reqJSON, h.timeout)
+	// Send only the raw body to NATS and wait for response
+	respData, err := h.natsClient.Request(subject, bodyBytes, h.timeout)
 	if err != nil {
 		if err.Error() == "timeout" {
 			http.Error(rw, "NATS request timeout", http.StatusGatewayTimeout)
@@ -212,31 +180,86 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Parse NATS response
-	var natsResp NatsResponse
-	if err := json.Unmarshal(respData, &natsResp); err != nil {
+
+
+	// Parse NATS response - expecting tuple of (status code, data)
+	var respTuple []interface{}
+	if err := json.Unmarshal(respData, &respTuple); err != nil {
 		http.Error(rw, "Failed to parse NATS response", http.StatusBadGateway)
 		return
 	}
 
-	// Write response headers
-	if natsResp.Headers != nil {
-		for key, value := range natsResp.Headers {
-			rw.Header().Set(key, value)
-		}
+	// Validate tuple format
+	if len(respTuple) != 2 {
+		http.Error(rw, "Invalid NATS response format: expected tuple of (statusCode, data)", http.StatusBadGateway)
+		return
 	}
 
-	// Write status code
-	statusCode := natsResp.StatusCode
+	// Extract status code
+	statusCode, ok := respTuple[0].(float64) // JSON numbers unmarshal as float64
+	if !ok {
+		http.Error(rw, "Invalid status code in NATS response", http.StatusBadGateway)
+		return
+	}
+
+	// Extract data (can be any type)
+	data := respTuple[1]
+
 	if statusCode == 0 {
-		statusCode = http.StatusOK
+		// Write status code
+		rw.WriteHeader(200)
+	} else {
+		http.Error(rw, fmt.Sprintf("Error: %d", int(statusCode)), http.StatusBadRequest)
+		return
 	}
-	rw.WriteHeader(statusCode)
 
-	// Write response body
-	if natsResp.Body != "" {
-		rw.Write([]byte(natsResp.Body))
+	// Write response body based on data type
+	switch v := data.(type) {
+	case string:
+		rw.Write([]byte(v))
+	case []byte:
+		rw.Write(v)
+	case nil:
+		// No body
+	default:
+		// For other types, marshal back to JSON
+		jsonData, err := json.Marshal(v)
+		if err != nil {
+			http.Error(rw, "Failed to marshal response data", http.StatusInternalServerError)
+			return
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		rw.Write(jsonData)
 	}
+
+	// // Parse NATS response
+	// var natsResp NatsResponse
+	// fmt.Printf("[NATS] Received payload %s\n", string(respData))
+
+	// if err := json.Unmarshal(respData, &natsResp); err != nil {
+	// 	fmt.Println(err.Error())
+	// 	http.Error(rw, "Failed to parse NATS response", http.StatusBadGateway)
+	// 	return
+	// }
+
+	// // Write response headers
+	// if natsResp.Headers != nil {
+	// 	for key, value := range natsResp.Headers {
+	// 		rw.Header().Set(key, value)
+	// 	}
+	// }
+
+	// // Write status code
+	// statusCode := natsResp.StatusCode
+	// if statusCode == 0 {
+	// 	statusCode = http.StatusOK
+	// }
+	// rw.WriteHeader(statusCode)
+
+	// // Write response body
+	// if natsResp.Body != "" {
+	// 	rw.Write([]byte(natsResp.Body))
+	// }
 }
 
 // NatsClient implements a basic NATS client using the NATS protocol
@@ -334,34 +357,43 @@ func NewNatsClient(addr, username, password, token string) (*NatsClient, error) 
 
 // readLoop continuously reads messages from NATS
 func (c *NatsClient) readLoop() {
+	fmt.Println("[NATS] Starting readLoop")
 	for c.connected {
 		line, err := c.reader.ReadString('\n')
 		if err != nil {
 			if c.connected {
+				fmt.Printf("[NATS] readLoop error while connected: %v\n", err)
 				c.connected = false
 			}
+			fmt.Println("[NATS] Exiting readLoop")
 			return
 		}
 
 		line = strings.TrimSpace(line)
+		fmt.Println(line)
 
 		if strings.HasPrefix(line, "MSG ") {
+			fmt.Printf("[NATS] Received MSG: %s\n", line)
 			// Parse: MSG <subject> <sid> [reply-to] <#bytes>
 			parts := strings.Fields(line)
 			if len(parts) < 4 {
+				fmt.Printf("[NATS] Invalid MSG format, parts: %d\n", len(parts))
 				continue
 			}
 
+			subject := parts[1]
 			var replyTo string
 			var bytesStr string
 
 			if len(parts) == 4 {
 				// No reply-to
 				bytesStr = parts[3]
+				fmt.Printf("[NATS] MSG without reply-to, bytes: %s\n", bytesStr)
 			} else {
 				// Has reply-to
 				replyTo = parts[3]
 				bytesStr = parts[4]
+				fmt.Printf("[NATS] MSG with reply-to: %s, bytes: %s\n", replyTo, bytesStr)
 			}
 
 			// Read message payload
@@ -371,24 +403,30 @@ func (c *NatsClient) readLoop() {
 			payload := make([]byte, numBytes+2) // +2 for \r\n
 			_, err = io.ReadFull(c.reader, payload)
 			if err != nil {
+				fmt.Printf("[NATS] Failed to read payload: %v\n", err)
 				continue
 			}
 
 			// Trim \r\n
 			payload = payload[:numBytes]
+			fmt.Printf("[NATS] Received payload (%d bytes): %s\n", numBytes, string(payload))
 
-			// Deliver to reply inbox if exists
-			if replyTo != "" {
-				c.mu.Lock()
-				if ch, exists := c.subscriptions[replyTo]; exists {
-					select {
-					case ch <- payload:
-					default:
-					}
+			// Deliver to subscription based on subject (which is the inbox for responses)
+			c.mu.Lock()
+			if ch, exists := c.subscriptions[subject]; exists {
+				fmt.Printf("[NATS] Delivering to subscription: %s\n", subject)
+				select {
+				case ch <- payload:
+					fmt.Printf("[NATS] Delivered to channel for: %s\n", subject)
+				default:
+					fmt.Printf("[NATS] Channel full for: %s\n", subject)
 				}
-				c.mu.Unlock()
+			} else {
+				fmt.Printf("[NATS] No subscription found for subject: %s\n", subject)
 			}
+			c.mu.Unlock()
 		} else if strings.HasPrefix(line, "PING") {
+			fmt.Println("[NATS] Received PING, sending PONG")
 			c.writer.WriteString("PONG\r\n")
 			c.writer.Flush()
 		}
