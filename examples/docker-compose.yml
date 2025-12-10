@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   # NATS Server
@@ -6,13 +6,13 @@ services:
     image: nats:latest
     container_name: nats-server
     ports:
-      - "4222:4222"  # Client connections
-      - "8222:8222"  # HTTP monitoring
-      - "6222:6222"  # Cluster connections
+      - "4222:4222" # Client connections
+      - "8222:8222" # HTTP monitoring
+      - "6222:6222" # Cluster connections
     command:
-      - "-js"                    # Enable JetStream
-      - "-m"                     # Enable monitoring
-      - "8222"                   # Monitoring port
+      - "-js" # Enable JetStream
+      - "-m" # Enable monitoring
+      - "8222" # Monitoring port
       - "--name"
       - "nats-server"
     networks:
@@ -44,16 +44,16 @@ services:
     image: traefik:v3.0
     container_name: traefik
     ports:
-      - "80:80"      # HTTP
-      - "443:443"    # HTTPS
-      - "8080:8080"  # Traefik Dashboard
+      - "80:80" # HTTP
+      - "443:443" # HTTPS
+      - "8080:8080" # Traefik Dashboard
     volumes:
       # Mount Traefik configuration
       - ./traefik-config/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik-config/dynamic-config.yml:/etc/traefik/dynamic-config.yml:ro
 
       # Mount the plugin (for local development)
-      - ../:/plugins-local/src/github.com/dominikdosoudil/traefik-plugin-http-to-nats:ro
+      - ../:/plugins-local/src/github.com/insoftcz/traefik-plugin-http-to-nats:ro
 
       # Mount Docker socket for Docker provider (optional)
       # - /var/run/docker.sock:/var/run/docker.sock:ro

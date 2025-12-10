@@ -1,16 +1,19 @@
 package traefik_plugin_http_to_nats
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
+	"sync"
 	"time"
-
-	"github.com/nats-io/nats.go"
 )
 
 // Config holds the plugin configuration.
@@ -27,7 +30,7 @@ type Config struct {
 func CreateConfig() *Config {
 	return &Config{
 		NatsUrl:        "nats://localhost:4222",
-		SubjectPattern: "/nats/{subject}",
+		SubjectPattern: "/api/{subject}",
 		Timeout:        5000, // milliseconds
 	}
 }
@@ -36,7 +39,7 @@ func CreateConfig() *Config {
 type HttpToNats struct {
 	next           http.Handler
 	name           string
-	natsConn       *nats.Conn
+	natsClient     *NatsClient
 	subjectPattern string
 	pathRegex      *regexp.Regexp
 	timeout        time.Duration
@@ -58,22 +61,14 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, fmt.Errorf("invalid subject pattern: %w", err)
 	}
 
-	// Set up NATS connection options
-	opts := []nats.Option{
-		nats.Name("Traefik HTTP-to-NATS Plugin"),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2 * time.Second),
+	// Parse NATS URL
+	natsURL, err := url.Parse(config.NatsUrl)
+	if err != nil {
+		return nil, fmt.Errorf("invalid NATS URL: %w", err)
 	}
 
-	// Add authentication if provided
-	if config.Username != "" && config.Password != "" {
-		opts = append(opts, nats.UserInfo(config.Username, config.Password))
-	} else if config.Token != "" {
-		opts = append(opts, nats.Token(config.Token))
-	}
-
-	// Connect to NATS
-	nc, err := nats.Connect(config.NatsUrl, opts...)
+	// Create NATS client
+	natsClient, err := NewNatsClient(natsURL.Host, config.Username, config.Password, config.Token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -86,7 +81,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	return &HttpToNats{
 		next:           next,
 		name:           name,
-		natsConn:       nc,
+		natsClient:     natsClient,
 		subjectPattern: config.SubjectPattern,
 		pathRegex:      pathRegex,
 		timeout:        timeout,
@@ -207,9 +202,9 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	// Send request to NATS and wait for response
-	msg, err := h.natsConn.Request(subject, reqJSON, h.timeout)
+	respData, err := h.natsClient.Request(subject, reqJSON, h.timeout)
 	if err != nil {
-		if err == nats.ErrTimeout {
+		if err.Error() == "timeout" {
 			http.Error(rw, "NATS request timeout", http.StatusGatewayTimeout)
 		} else {
 			http.Error(rw, fmt.Sprintf("NATS request failed: %v", err), http.StatusBadGateway)
@@ -219,7 +214,7 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// Parse NATS response
 	var natsResp NatsResponse
-	if err := json.Unmarshal(msg.Data, &natsResp); err != nil {
+	if err := json.Unmarshal(respData, &natsResp); err != nil {
 		http.Error(rw, "Failed to parse NATS response", http.StatusBadGateway)
 		return
 	}
@@ -242,4 +237,240 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if natsResp.Body != "" {
 		rw.Write([]byte(natsResp.Body))
 	}
+}
+
+// NatsClient implements a basic NATS client using the NATS protocol
+type NatsClient struct {
+	conn          net.Conn
+	reader        *bufio.Reader
+	writer        *bufio.Writer
+	mu            sync.Mutex
+	subscriptions map[string]chan []byte
+	inboxPrefix   string
+	inboxCounter  int
+	connected     bool
+}
+
+// NewNatsClient creates a new NATS client connection
+func NewNatsClient(addr, username, password, token string) (*NatsClient, error) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
+	}
+
+	client := &NatsClient{
+		conn:          conn,
+		reader:        bufio.NewReader(conn),
+		writer:        bufio.NewWriter(conn),
+		subscriptions: make(map[string]chan []byte),
+		inboxPrefix:   "_INBOX.",
+		inboxCounter:  0,
+		connected:     true,
+	}
+
+	// Read server INFO
+	line, err := client.reader.ReadString('\n')
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to read INFO: %w", err)
+	}
+
+	// Parse INFO to check if auth is required
+	requiresAuth := strings.Contains(line, `"auth_required":true`)
+
+	// Send CONNECT message
+	connectMsg := map[string]interface{}{
+		"verbose":  false,
+		"pedantic": false,
+		"name":     "traefik-http-to-nats",
+	}
+
+	if requiresAuth {
+		if token != "" {
+			connectMsg["auth_token"] = token
+		} else if username != "" && password != "" {
+			connectMsg["user"] = username
+			connectMsg["pass"] = password
+		}
+	}
+
+	connectJSON, _ := json.Marshal(connectMsg)
+	_, err = client.writer.WriteString(fmt.Sprintf("CONNECT %s\r\n", connectJSON))
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to send CONNECT: %w", err)
+	}
+
+	// Send PING
+	_, err = client.writer.WriteString("PING\r\n")
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to send PING: %w", err)
+	}
+
+	err = client.writer.Flush()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to flush: %w", err)
+	}
+
+	// Wait for PONG
+	pong, err := client.reader.ReadString('\n')
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to read PONG: %w", err)
+	}
+
+	if !strings.HasPrefix(pong, "PONG") {
+		conn.Close()
+		return nil, fmt.Errorf("expected PONG, got: %s", pong)
+	}
+
+	// Start message reader goroutine
+	go client.readLoop()
+
+	return client, nil
+}
+
+// readLoop continuously reads messages from NATS
+func (c *NatsClient) readLoop() {
+	for c.connected {
+		line, err := c.reader.ReadString('\n')
+		if err != nil {
+			if c.connected {
+				c.connected = false
+			}
+			return
+		}
+
+		line = strings.TrimSpace(line)
+
+		if strings.HasPrefix(line, "MSG ") {
+			// Parse: MSG <subject> <sid> [reply-to] <#bytes>
+			parts := strings.Fields(line)
+			if len(parts) < 4 {
+				continue
+			}
+
+			var replyTo string
+			var bytesStr string
+
+			if len(parts) == 4 {
+				// No reply-to
+				bytesStr = parts[3]
+			} else {
+				// Has reply-to
+				replyTo = parts[3]
+				bytesStr = parts[4]
+			}
+
+			// Read message payload
+			var numBytes int
+			fmt.Sscanf(bytesStr, "%d", &numBytes)
+
+			payload := make([]byte, numBytes+2) // +2 for \r\n
+			_, err = io.ReadFull(c.reader, payload)
+			if err != nil {
+				continue
+			}
+
+			// Trim \r\n
+			payload = payload[:numBytes]
+
+			// Deliver to reply inbox if exists
+			if replyTo != "" {
+				c.mu.Lock()
+				if ch, exists := c.subscriptions[replyTo]; exists {
+					select {
+					case ch <- payload:
+					default:
+					}
+				}
+				c.mu.Unlock()
+			}
+		} else if strings.HasPrefix(line, "PING") {
+			c.writer.WriteString("PONG\r\n")
+			c.writer.Flush()
+		}
+	}
+}
+
+// Request sends a request to NATS and waits for a response
+func (c *NatsClient) Request(subject string, data []byte, timeout time.Duration) ([]byte, error) {
+	if !c.connected {
+		return nil, fmt.Errorf("not connected to NATS")
+	}
+
+	c.mu.Lock()
+	c.inboxCounter++
+	inbox := fmt.Sprintf("%s%d", c.inboxPrefix, c.inboxCounter)
+
+	// Create response channel
+	respCh := make(chan []byte, 1)
+	c.subscriptions[inbox] = respCh
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.subscriptions, inbox)
+		close(respCh)
+		c.mu.Unlock()
+	}()
+
+	// Subscribe to inbox
+	c.mu.Lock()
+	_, err := c.writer.WriteString(fmt.Sprintf("SUB %s 1\r\n", inbox))
+	if err != nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("failed to subscribe: %w", err)
+	}
+
+	// Publish message
+	_, err = c.writer.WriteString(fmt.Sprintf("PUB %s %s %d\r\n", subject, inbox, len(data)))
+	if err != nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("failed to publish: %w", err)
+	}
+
+	_, err = c.writer.Write(data)
+	if err != nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("failed to write data: %w", err)
+	}
+
+	_, err = c.writer.WriteString("\r\n")
+	if err != nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("failed to write CRLF: %w", err)
+	}
+
+	err = c.writer.Flush()
+	c.mu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("failed to flush: %w", err)
+	}
+
+	// Wait for response or timeout
+	select {
+	case resp := <-respCh:
+		// Unsubscribe
+		c.mu.Lock()
+		c.writer.WriteString(fmt.Sprintf("UNSUB 1\r\n"))
+		c.writer.Flush()
+		c.mu.Unlock()
+		return resp, nil
+	case <-time.After(timeout):
+		// Unsubscribe on timeout
+		c.mu.Lock()
+		c.writer.WriteString(fmt.Sprintf("UNSUB 1\r\n"))
+		c.writer.Flush()
+		c.mu.Unlock()
+		return nil, fmt.Errorf("timeout")
+	}
+}
+
+// Close closes the NATS connection
+func (c *NatsClient) Close() error {
+	c.connected = false
+	return c.conn.Close()
 }

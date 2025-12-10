@@ -32,10 +32,10 @@ experimental:
   # For local plugin development
   localPlugins:
     http-to-nats:
-      moduleName: github.com/dominikdosoudil/traefik-plugin-http-to-nats
+      moduleName: github.com/insoftcz/traefik-plugin-http-to-nats
 
   # For production use (uncomment and comment out localPlugins above)
   # plugins:
   #   http-to-nats:
-  #     moduleName: github.com/dominikdosoudil/traefik-plugin-http-to-nats
+  #     moduleName: github.com/insoftcz/traefik-plugin-http-to-nats
   #     version: v1.0.0

@@ -2,6 +2,8 @@
 
 A Traefik middleware plugin that forwards HTTP requests to NATS based on URL patterns. This plugin extracts dynamic parts from the URL path and uses them as NATS subjects, enabling seamless HTTP-to-NATS request routing.
 
+**Note:** This plugin uses only Go's standard library and implements a lightweight NATS protocol client, making it compatible with Traefik's Yaegi interpreter without external dependencies.
+
 ## Features
 
 - 🚀 Dynamic URL pattern matching with named placeholders
@@ -52,7 +54,7 @@ Add the plugin to your Traefik static configuration:
 experimental:
   localPlugins:
     http-to-nats:
-      moduleName: github.com/dominikdosoudil/traefik-plugin-http-to-nats
+      moduleName: github.com/insoftcz/traefik-plugin-http-to-nats
 ```
 
 ### Plugin Catalog (for production)
@@ -62,7 +64,7 @@ experimental:
 experimental:
   plugins:
     http-to-nats:
-      moduleName: github.com/dominikdosoudil/traefik-plugin-http-to-nats
+      moduleName: github.com/insoftcz/traefik-plugin-http-to-nats
       version: v1.0.0
 ```
 

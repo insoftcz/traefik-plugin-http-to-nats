@@ -1,7 +1,7 @@
 displayName: HTTP to NATS Plugin
 type: middleware
 
-import: github.com/dominikdosoudil/traefik-plugin-http-to-nats
+import: github.com/insoftcz/traefik-plugin-http-to-nats
 
 summary: Forwards HTTP requests to NATS based on URL patterns
 
