@@ -40,9 +40,19 @@ type HttpToNats struct {
 	next           http.Handler
 	name           string
 	natsClient     *NatsClient
+	natsConfig     *natsConfig
 	subjectPattern string
 	pathRegex      *regexp.Regexp
 	timeout        time.Duration
+	mu             sync.Mutex
+}
+
+// natsConfig holds the configuration needed to create a NATS connection
+type natsConfig struct {
+	host     string
+	username string
+	password string
+	token    string
 }
 
 // New creates a new HttpToNats plugin instance.
@@ -67,21 +77,24 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, fmt.Errorf("invalid NATS URL: %w", err)
 	}
 
-	// Create NATS client
-	natsClient, err := NewNatsClient(natsURL.Host, config.Username, config.Password, config.Token)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
-	}
-
 	timeout := time.Duration(config.Timeout) * time.Millisecond
 	if timeout == 0 {
 		timeout = 5 * time.Second
 	}
 
+	// Store NATS configuration for lazy connection
+	natsConf := &natsConfig{
+		host:     natsURL.Host,
+		username: config.Username,
+		password: config.Password,
+		token:    config.Token,
+	}
+
 	return &HttpToNats{
 		next:           next,
 		name:           name,
-		natsClient:     natsClient,
+		natsClient:     nil, // Will be initialized lazily
+		natsConfig:     natsConf,
 		subjectPattern: config.SubjectPattern,
 		pathRegex:      pathRegex,
 		timeout:        timeout,
@@ -149,8 +162,33 @@ type NatsResponse struct {
 	Body       string            `json:"body,omitempty"`
 }
 
+// ensureConnected ensures the NATS client is connected (lazy initialization)
+func (h *HttpToNats) ensureConnected() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.natsClient != nil {
+		return nil
+	}
+
+	// Create NATS client connection
+	client, err := NewNatsClient(h.natsConfig.host, h.natsConfig.username, h.natsConfig.password, h.natsConfig.token)
+	if err != nil {
+		return fmt.Errorf("failed to connect to NATS: %w", err)
+	}
+
+	h.natsClient = client
+	return nil
+}
+
 // ServeHTTP handles the HTTP request and forwards it to NATS.
 func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	// Ensure NATS connection is established (lazy initialization)
+	if err := h.ensureConnected(); err != nil {
+		http.Error(rw, fmt.Sprintf("Failed to connect to NATS: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
 	// Extract subject from URL
 	subject, err := h.extractSubject(req.URL.Path)
 	if err != nil {
