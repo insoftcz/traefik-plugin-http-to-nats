@@ -420,18 +420,18 @@ func (c *NatsClient) readLoop() {
 			}
 
 			subject := parts[1]
-			var replyTo string
 			var bytesStr string
 
 			if len(parts) == 4 {
 				// No reply-to
 				bytesStr = parts[3]
-				fmt.Printf("[NATS] MSG without reply-to, bytes: %s\n", bytesStr)
 			} else {
-				// Has reply-to
-				replyTo = parts[3]
+				replyTo := parts[3]
 				bytesStr = parts[4]
+
+				// Has reply-to
 				fmt.Printf("[NATS] MSG with reply-to: %s, bytes: %s\n", replyTo, bytesStr)
+				continue; // not a reply message, rather it's request of something else
 			}
 
 			// Read message payload
