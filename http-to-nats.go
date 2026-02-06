@@ -243,6 +243,9 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// Extract data (can be any type)
 	data := respTuple[1]
 
+	// Set JSON content type for all responses
+	rw.Header().Set("Content-Type", "application/json")
+
 	if statusCode == 1 {
 		// Write status code
 		rw.WriteHeader(200)
@@ -266,7 +269,6 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			http.Error(rw, "Failed to marshal response data", http.StatusInternalServerError)
 			return
 		}
-		rw.Header().Set("Content-Type", "application/json")
 		rw.Write(jsonData)
 	}
 
