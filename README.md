@@ -159,19 +159,38 @@ The plugin sends the following JSON structure to NATS:
 
 ## Response Format
 
-Your NATS service should respond with the following JSON structure:
+Your NATS service should respond with a JSON array (tuple) containing a status code and data:
 
 ```json
-{
-  "statusCode": 200,
-  "headers": {
-    "Content-Type": "application/json"
-  },
-  "body": "{\"id\": 123, \"name\": \"John Doe\"}"
-}
+[1, {"id": 123, "name": "John Doe"}]
 ```
 
-If `statusCode` is omitted, it defaults to `200 OK`.
+**Format:** `[statusCode, data]`
+
+- **`statusCode`**: Use `1` to indicate success. Any other value is treated as an error.
+- **`data`**: The response payload. Can be a string, object, array, or null.
+
+**Examples:**
+
+Success with JSON object:
+```json
+[1, {"id": 123, "name": "John Doe"}]
+```
+
+Success with string:
+```json
+[1, "Operation completed successfully"]
+```
+
+Success with no body:
+```json
+[1, null]
+```
+
+Error response (statusCode != 1):
+```json
+[0, "Database connection failed"]
+```
 
 ## NATS Service Example
 
@@ -194,12 +213,6 @@ type Request struct {
     Body    string            `json:"body"`
 }
 
-type Response struct {
-    StatusCode int               `json:"statusCode"`
-    Headers    map[string]string `json:"headers"`
-    Body       string            `json:"body"`
-}
-
 func main() {
     nc, _ := nats.Connect(nats.DefaultURL)
     defer nc.Close()
@@ -208,12 +221,14 @@ func main() {
         var req Request
         json.Unmarshal(m.Data, &req)
 
-        resp := Response{
-            StatusCode: 200,
-            Headers: map[string]string{
-                "Content-Type": "application/json",
+        // Respond with tuple: [statusCode, data]
+        // statusCode 1 = success, any other value = error
+        resp := []interface{}{
+            1, // Success status
+            map[string]interface{}{
+                "message": "User created successfully",
+                "method": req.Method,
             },
-            Body: `{"message": "User created successfully"}`,
         }
 
         data, _ := json.Marshal(resp)

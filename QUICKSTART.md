@@ -152,14 +152,15 @@ http:
 Edit `nats-service/main.go` to add your own business logic:
 
 ```go
-func handleUsers(req Request) Response {
+func handleUsers(req Request) []interface{} {
     // Your custom logic here
-    return Response{
-        StatusCode: 200,
-        Headers: map[string]string{
-            "Content-Type": "application/json",
+    // Return tuple: [statusCode, data]
+    // statusCode 1 = success, any other value = error
+    return []interface{}{
+        1, // Success status
+        map[string]interface{}{
+            "custom": "response",
         },
-        Body: `{"custom": "response"}`,
     }
 }
 ```

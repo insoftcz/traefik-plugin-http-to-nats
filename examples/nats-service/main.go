@@ -22,11 +22,8 @@ type Request struct {
 }
 
 // Response represents the response to send back to the Traefik plugin
-type Response struct {
-	StatusCode int               `json:"statusCode"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	Body       string            `json:"body,omitempty"`
-}
+// Format: [statusCode, data] where statusCode 1 = success, other values = error
+type Response []interface{}
 
 func main() {
 	// Get NATS URL from environment or use default
@@ -95,11 +92,10 @@ func createHandler(subject string) nats.MsgHandler {
 			resp = handleProducts(req)
 		default:
 			resp = Response{
-				StatusCode: 404,
-				Headers: map[string]string{
-					"Content-Type": "application/json",
+				0, // Error status
+				map[string]interface{}{
+					"error": fmt.Sprintf("Unknown subject: %s", subject),
 				},
-				Body: fmt.Sprintf(`{"error": "Unknown subject: %s"}`, subject),
 			}
 		}
 
@@ -122,42 +118,40 @@ func handleUsers(req Request) Response {
 	switch req.Method {
 	case "GET":
 		return Response{
-			StatusCode: 200,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
+			1, // Success status
+			map[string]interface{}{
+				"users": []map[string]interface{}{
+					{"id": 1, "name": "John Doe"},
+					{"id": 2, "name": "Jane Smith"},
+				},
 			},
-			Body: `{"users": [{"id": 1, "name": "John Doe"}, {"id": 2, "name": "Jane Smith"}]}`,
 		}
 	case "POST":
 		return Response{
-			StatusCode: 201,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
+			1, // Success status
+			map[string]interface{}{
+				"message":  "User created",
+				"received": req.Body,
 			},
-			Body: fmt.Sprintf(`{"message": "User created", "received": %s}`, req.Body),
 		}
 	case "PUT":
 		return Response{
-			StatusCode: 200,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
+			1, // Success status
+			map[string]interface{}{
+				"message": "User updated",
 			},
-			Body: `{"message": "User updated"}`,
 		}
 	case "DELETE":
 		return Response{
-			StatusCode: 204,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
+			1,   // Success status
+			nil, // No body for DELETE
 		}
 	default:
 		return Response{
-			StatusCode: 405,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
+			0, // Error status
+			map[string]interface{}{
+				"error": "Method not allowed",
 			},
-			Body: `{"error": "Method not allowed"}`,
 		}
 	}
 }
@@ -167,27 +161,28 @@ func handleOrders(req Request) Response {
 	switch req.Method {
 	case "GET":
 		return Response{
-			StatusCode: 200,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
+			1, // Success status
+			map[string]interface{}{
+				"orders": []map[string]interface{}{
+					{"id": 101, "total": 99.99},
+					{"id": 102, "total": 149.99},
+				},
 			},
-			Body: `{"orders": [{"id": 101, "total": 99.99}, {"id": 102, "total": 149.99}]}`,
 		}
 	case "POST":
 		return Response{
-			StatusCode: 201,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
+			1, // Success status
+			map[string]interface{}{
+				"message": "Order created",
+				"orderId": 103,
 			},
-			Body: `{"message": "Order created", "orderId": 103}`,
 		}
 	default:
 		return Response{
-			StatusCode: 405,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
+			0, // Error status
+			map[string]interface{}{
+				"error": "Method not allowed",
 			},
-			Body: `{"error": "Method not allowed"}`,
 		}
 	}
 }
@@ -195,22 +190,22 @@ func handleOrders(req Request) Response {
 // handleProducts processes requests for the "products" subject
 func handleProducts(req Request) Response {
 	return Response{
-		StatusCode: 200,
-		Headers: map[string]string{
-			"Content-Type": "application/json",
+		1, // Success status
+		map[string]interface{}{
+			"products": []map[string]interface{}{
+				{"id": 1, "name": "Widget", "price": 19.99},
+			},
 		},
-		Body: `{"products": [{"id": 1, "name": "Widget", "price": 19.99}]}`,
 	}
 }
 
 // sendErrorResponse sends an error response
 func sendErrorResponse(m *nats.Msg, statusCode int, message string) {
 	resp := Response{
-		StatusCode: statusCode,
-		Headers: map[string]string{
-			"Content-Type": "application/json",
+		0, // Error status
+		map[string]interface{}{
+			"error": message,
 		},
-		Body: fmt.Sprintf(`{"error": "%s"}`, message),
 	}
 
 	data, _ := json.Marshal(resp)

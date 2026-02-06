@@ -243,7 +243,7 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// Extract data (can be any type)
 	data := respTuple[1]
 
-	if statusCode == 0 {
+	if statusCode == 1 {
 		// Write status code
 		rw.WriteHeader(200)
 	} else {
