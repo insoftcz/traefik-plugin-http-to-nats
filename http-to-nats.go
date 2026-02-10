@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -310,7 +312,6 @@ type NatsClient struct {
 	mu            sync.Mutex
 	subscriptions map[string]chan []byte
 	inboxPrefix   string
-	inboxCounter  int
 	connected     bool
 }
 
@@ -327,7 +328,6 @@ func NewNatsClient(addr, username, password, token string) (*NatsClient, error) 
 		writer:        bufio.NewWriter(conn),
 		subscriptions: make(map[string]chan []byte),
 		inboxPrefix:   "_INBOX.",
-		inboxCounter:  0,
 		connected:     true,
 	}
 
@@ -479,10 +479,14 @@ func (c *NatsClient) Request(subject string, data []byte, timeout time.Duration)
 		return nil, fmt.Errorf("not connected to NATS")
 	}
 
-	c.mu.Lock()
-	c.inboxCounter++
-	inbox := fmt.Sprintf("%s%d", c.inboxPrefix, c.inboxCounter)
+	// Generate UUID for inbox
+	uuid, errUuid := generateUUID()
+	if errUuid != nil {
+		return nil, fmt.Errorf("failed to generate UUID: %w", errUuid)
+	}
+	inbox := fmt.Sprintf("%s%s", c.inboxPrefix, uuid)
 
+	c.mu.Lock()
 	// Create response channel
 	respCh := make(chan []byte, 1)
 	c.subscriptions[inbox] = respCh
@@ -545,6 +549,21 @@ func (c *NatsClient) Request(subject string, data []byte, timeout time.Duration)
 		c.mu.Unlock()
 		return nil, fmt.Errorf("timeout")
 	}
+}
+
+// generateUUID generates a UUID v4 string
+func generateUUID() (string, error) {
+	uuid := make([]byte, 16)
+	if _, err := rand.Read(uuid); err != nil {
+		return "", err
+	}
+
+	// Set version (4) and variant bits according to RFC 4122
+	uuid[6] = (uuid[6] & 0x0f) | 0x40 // Version 4
+	uuid[8] = (uuid[8] & 0x3f) | 0x80 // Variant is 10
+
+	// Format as hex string (we don't need dashes for NATS inbox)
+	return hex.EncodeToString(uuid), nil
 }
 
 // Close closes the NATS connection
