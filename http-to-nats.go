@@ -313,6 +313,7 @@ type NatsClient struct {
 	subscriptions map[string]chan []byte
 	inboxPrefix   string
 	connected     bool
+	sidCounter    uint64
 }
 
 // NewNatsClient creates a new NATS client connection
@@ -329,6 +330,7 @@ func NewNatsClient(addr, username, password, token string) (*NatsClient, error) 
 		subscriptions: make(map[string]chan []byte),
 		inboxPrefix:   "_INBOX.",
 		connected:     true,
+		sidCounter:    0,
 	}
 
 	// Read server INFO
@@ -486,6 +488,12 @@ func (c *NatsClient) Request(subject string, data []byte, timeout time.Duration)
 	}
 	inbox := fmt.Sprintf("%s%s", c.inboxPrefix, uuid)
 
+	// Generate unique subscription ID
+	c.mu.Lock()
+	c.sidCounter++
+	sid := c.sidCounter
+	c.mu.Unlock()
+
 	c.mu.Lock()
 	// Create response channel
 	respCh := make(chan []byte, 1)
@@ -501,7 +509,7 @@ func (c *NatsClient) Request(subject string, data []byte, timeout time.Duration)
 
 	// Subscribe to inbox
 	c.mu.Lock()
-	_, err := c.writer.WriteString(fmt.Sprintf("SUB %s 1\r\n", inbox))
+	_, err := c.writer.WriteString(fmt.Sprintf("SUB %s %d\r\n", inbox, sid))
 	if err != nil {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("failed to subscribe: %w", err)
@@ -537,14 +545,14 @@ func (c *NatsClient) Request(subject string, data []byte, timeout time.Duration)
 	case resp := <-respCh:
 		// Unsubscribe
 		c.mu.Lock()
-		c.writer.WriteString(fmt.Sprintf("UNSUB 1\r\n"))
+		c.writer.WriteString(fmt.Sprintf("UNSUB %d\r\n", sid))
 		c.writer.Flush()
 		c.mu.Unlock()
 		return resp, nil
 	case <-time.After(timeout):
 		// Unsubscribe on timeout
 		c.mu.Lock()
-		c.writer.WriteString(fmt.Sprintf("UNSUB 1\r\n"))
+		c.writer.WriteString(fmt.Sprintf("UNSUB %d\r\n", sid))
 		c.writer.Flush()
 		c.mu.Unlock()
 		return nil, fmt.Errorf("timeout")
