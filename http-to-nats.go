@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -164,30 +165,58 @@ type NatsResponse struct {
 	Body       string            `json:"body,omitempty"`
 }
 
-// ensureConnected ensures the NATS client is connected (lazy initialization)
+// ensureConnected ensures the NATS client is connected (lazy initialization and reconnection)
 func (h *HttpToNats) ensureConnected() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.natsClient != nil {
+	// Check if we have a client and if it's connected
+	if h.natsClient != nil && h.natsClient.IsConnected() {
 		return nil
 	}
 
-	// Create NATS client connection
-	client, err := NewNatsClient(h.natsConfig.host, h.natsConfig.username, h.natsConfig.password, h.natsConfig.token)
-	if err != nil {
-		return fmt.Errorf("failed to connect to NATS: %w", err)
+	// Close old connection if exists but disconnected
+	if h.natsClient != nil {
+		h.natsClient.Close()
+		h.natsClient = nil
 	}
 
-	h.natsClient = client
-	return nil
+	// Create NATS client connection with retry logic
+	var client *NatsClient
+	var err error
+	maxRetries := 3
+	baseDelay := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := baseDelay * time.Duration(1<<uint(attempt-1)) // Exponential backoff: 100ms, 200ms, 400ms
+			fmt.Printf("[NATS] Reconnection attempt %d/%d after %v\n", attempt+1, maxRetries, delay)
+			time.Sleep(delay)
+		}
+
+		client, err = NewNatsClient(h.natsConfig.host, h.natsConfig.username, h.natsConfig.password, h.natsConfig.token)
+		if err == nil {
+			h.natsClient = client
+			fmt.Println("[NATS] Successfully connected/reconnected")
+			return nil
+		}
+		fmt.Printf("[NATS] Connection attempt %d failed: %v\n", attempt+1, err)
+	}
+
+	return fmt.Errorf("failed to connect to NATS after %d attempts: %w", maxRetries, err)
 }
 
 // ServeHTTP handles the HTTP request and forwards it to NATS.
 func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	// Ensure NATS connection is established (lazy initialization)
+	// Ensure NATS connection is established (lazy initialization and reconnection)
 	if err := h.ensureConnected(); err != nil {
 		http.Error(rw, fmt.Sprintf("Failed to connect to NATS: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
+	// Double-check connection before making request
+	if !h.natsClient.IsConnected() {
+		http.Error(rw, "NATS connection lost", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -212,15 +241,25 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// Send only the raw body to NATS and wait for response
 	respData, err := h.natsClient.Request(subject, bodyBytes, h.timeout)
 	if err != nil {
+		// If connection was lost, mark client for reconnection
+		if !h.natsClient.IsConnected() {
+			h.mu.Lock()
+			if h.natsClient != nil {
+				h.natsClient.Close()
+				h.natsClient = nil
+			}
+			h.mu.Unlock()
+		}
+
 		if err.Error() == "timeout" {
 			http.Error(rw, "NATS request timeout", http.StatusGatewayTimeout)
+		} else if err.Error() == "not connected to NATS" {
+			http.Error(rw, "NATS connection lost", http.StatusServiceUnavailable)
 		} else {
 			http.Error(rw, fmt.Sprintf("NATS request failed: %v", err), http.StatusBadGateway)
 		}
 		return
 	}
-
-
 
 	// Parse NATS response - expecting tuple of (status code, data)
 	var respTuple []interface{}
@@ -273,35 +312,6 @@ func (h *HttpToNats) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 		rw.Write(jsonData)
 	}
-
-	// // Parse NATS response
-	// var natsResp NatsResponse
-	// fmt.Printf("[NATS] Received payload %s\n", string(respData))
-
-	// if err := json.Unmarshal(respData, &natsResp); err != nil {
-	// 	fmt.Println(err.Error())
-	// 	http.Error(rw, "Failed to parse NATS response", http.StatusBadGateway)
-	// 	return
-	// }
-
-	// // Write response headers
-	// if natsResp.Headers != nil {
-	// 	for key, value := range natsResp.Headers {
-	// 		rw.Header().Set(key, value)
-	// 	}
-	// }
-
-	// // Write status code
-	// statusCode := natsResp.StatusCode
-	// if statusCode == 0 {
-	// 	statusCode = http.StatusOK
-	// }
-	// rw.WriteHeader(statusCode)
-
-	// // Write response body
-	// if natsResp.Body != "" {
-	// 	rw.Write([]byte(natsResp.Body))
-	// }
 }
 
 // NatsClient implements a basic NATS client using the NATS protocol
@@ -312,8 +322,9 @@ type NatsClient struct {
 	mu            sync.Mutex
 	subscriptions map[string]chan []byte
 	inboxPrefix   string
-	connected     bool
+	connected     atomic.Bool
 	sidCounter    uint64
+	closeChan     chan struct{}
 }
 
 // NewNatsClient creates a new NATS client connection
@@ -329,9 +340,10 @@ func NewNatsClient(addr, username, password, token string) (*NatsClient, error) 
 		writer:        bufio.NewWriter(conn),
 		subscriptions: make(map[string]chan []byte),
 		inboxPrefix:   "_INBOX.",
-		connected:     true,
 		sidCounter:    0,
+		closeChan:     make(chan struct{}),
 	}
+	client.connected.Store(true)
 
 	// Read server INFO
 	line, err := client.reader.ReadString('\n')
@@ -400,14 +412,24 @@ func NewNatsClient(addr, username, password, token string) (*NatsClient, error) 
 // readLoop continuously reads messages from NATS
 func (c *NatsClient) readLoop() {
 	fmt.Println("[NATS] Starting readLoop")
-	for c.connected {
+	defer func() {
+		c.connected.Store(false)
+		fmt.Println("[NATS] Exiting readLoop")
+	}()
+
+	for {
+		select {
+		case <-c.closeChan:
+			return
+		default:
+		}
+
 		line, err := c.reader.ReadString('\n')
 		if err != nil {
-			if c.connected {
+			if c.connected.Load() {
 				fmt.Printf("[NATS] readLoop error while connected: %v\n", err)
-				c.connected = false
+				c.connected.Store(false)
 			}
-			fmt.Println("[NATS] Exiting readLoop")
 			return
 		}
 
@@ -435,7 +457,7 @@ func (c *NatsClient) readLoop() {
 
 				// Has reply-to
 				fmt.Printf("[NATS] MSG with reply-to: %s, bytes: %s\n", replyTo, bytesStr)
-				continue; // not a reply message, rather it's request of something else
+				continue // not a reply message, rather it's request of something else
 			}
 
 			// Read message payload
@@ -477,7 +499,7 @@ func (c *NatsClient) readLoop() {
 
 // Request sends a request to NATS and waits for a response
 func (c *NatsClient) Request(subject string, data []byte, timeout time.Duration) ([]byte, error) {
-	if !c.connected {
+	if !c.connected.Load() {
 		return nil, fmt.Errorf("not connected to NATS")
 	}
 
@@ -574,8 +596,22 @@ func generateUUID() (string, error) {
 	return hex.EncodeToString(uuid), nil
 }
 
+// IsConnected returns whether the client is currently connected
+func (c *NatsClient) IsConnected() bool {
+	return c.connected.Load()
+}
+
 // Close closes the NATS connection
 func (c *NatsClient) Close() error {
-	c.connected = false
-	return c.conn.Close()
+	if !c.connected.Load() {
+		return nil
+	}
+
+	c.connected.Store(false)
+	close(c.closeChan)
+
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
 }
